@@ -1,0 +1,15 @@
+# Virtual environment
+EEGTest1/
+
+# Visual Studio user settings
+*.pyproj.user
+
+# Python cache
+__pycache__/
+*.pyc
+
+# VSCode (if used)
+.vscode/
+
+# TorchEEG processed IO folder (auto-generated)
+deap/
