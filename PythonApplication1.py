@@ -1,17 +1,50 @@
-from torcheeg.datasets import DEAPDataset
-from torcheeg import transforms
+import scipy.io
+import torch
+from torch.utils.data import Dataset, DataLoader
+from torcheeg.models import EEGNet
 
-dataset = DEAPDataset(root_path='./data_preprocessed_python',
-                      online_transform=transforms.Compose([
-                          transforms.To2d(),
-                          transforms.ToTensor()
-                      ]),
-                      label_transform=transforms.Compose([
-                          transforms.Select(['valence', 'arousal']),
-                          transforms.Binary(5.0),
-                          transforms.BinariesToCategory()
-                      ]))
-print(dataset[0])
-# EEG signal (torch.Tensor[1, 32, 128]),
-# coresponding baseline signal (torch.Tensor[1, 32, 128]),
-# label (int)
+class EEGDataset(Dataset):
+    def __init__(self, X, Y):
+        self.X = torch.tensor(X, dtype=torch.float32)
+        self.Y = torch.tensor(Y, dtype=torch.long).squeeze()
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.Y[idx]
+
+data = scipy.io.loadmat('eeg_data.mat')
+
+X = data['X']  
+Y = data['Y']
+
+dataset = EEGDataset(X, Y)
+loader = DataLoader(dataset, batch_size=64, shuffle=True)
+
+model = EEGNet(
+    chunk_size=128,      
+    num_electrodes=14,   
+    dropout=0.5,
+    kernel_1=64,
+    kernel_2=16,
+    F1=8,
+    F2=16,
+    D=2,
+    num_classes=2
+)
+
+x, y = next(iter(loader))
+output = model(x)
+print(output.shape)
+
+class EEGDataset(Dataset):
+    def __init__(self, X, Y):
+        self.X = torch.tensor(X, dtype=torch.float32)
+        self.Y = torch.tensor(Y, dtype=torch.long).squeeze()
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.Y[idx]
