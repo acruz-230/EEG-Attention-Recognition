@@ -1,4 +1,3 @@
-'EOF'
 # Virtual environments
 EEGTest1/
 venv/
@@ -8,15 +7,15 @@ venv/
 __pycache__/
 *.pyc
 
-# Visual Studio user settings
+# Visual Studio / VS
 *.pyproj.user
+.vs/
 
 # VSCode
 .vscode/
 
-# TorchEEG IO cache (optional)
+# TorchEEG cache/output (optional)
 deap/
 
-# Datasets (optional - strongly recommended for DEAP)
+# Datasets (recommended: don't commit DEAP data)
 data_preprocessed_python/
-EOF
