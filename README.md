@@ -8,7 +8,7 @@ Training a CNN to recognize attention patterns from EEG data.
     pip install torch==2.2.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
     ```
 - [TorchScatter](https://pypi.org/project/torch-scatter/#files)
-      - CPU only Version
+    - CPU only Version
       ```
       pip install torch-scatter -f https://data.pyg.org/whl/torch-2.2.0+cpu.html
       ```
