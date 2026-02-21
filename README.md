@@ -2,10 +2,10 @@
 Training a CNN to recognize attention patterns from EEG data. 
 # Pre-Requisites 
 - [Python 3.10.1](https://www.python.org/downloads/release/python-3101/)
-- [Pytorch](https://pytorch.org/get-started/locally/)
+- [Pytorch 2.2.0](https://pytorch.org/get-started/locally/)
     - Command to install cpu version for windows
     ```
-    pip3 install torch torchvision
+    pip install torch==2.2.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
     ```
 - [TorchEEG](https://torcheeg.readthedocs.io/en/latest/installation.html)
     - Pip Install    
