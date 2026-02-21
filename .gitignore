@@ -1,0 +1,22 @@
+'EOF'
+# Virtual environments
+EEGTest1/
+venv/
+.env/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Visual Studio user settings
+*.pyproj.user
+
+# VSCode
+.vscode/
+
+# TorchEEG IO cache (optional)
+deap/
+
+# Datasets (optional - strongly recommended for DEAP)
+data_preprocessed_python/
+EOF
