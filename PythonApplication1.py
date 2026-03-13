@@ -1,30 +1,57 @@
-import scipy.io
 import torch
-from torch.utils.data import Dataset, DataLoader
-from torcheeg.models import EEGNet
-
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, random_split
 from torcheeg.datasets import SleepEDFxDataset
 from torcheeg import transforms
 from torcheeg.models import EEGNet
-from torch.utils.data import DataLoader
 
-# 1) Dataset: cassette subset, 2 EEG channels, 30s windows
+# ---------------------------
+# 1) Reproducibility / device
+# ---------------------------
+torch.manual_seed(42)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
+
+# ---------------------------
+# 2) Dataset
+# ---------------------------
+
+label_map = {
+    "W": 0,   # Wake
+    "1": 1,   # N1
+    "2": 2,   # N2
+    "3": 3,   # N3
+    "4": 4,   # N4
+    "R": 5    # REM
+}
 dataset = SleepEDFxDataset(
     root_path="./sleep-edf-database-expanded-1.0.0",
     version="cassette",
-    num_channel=2,          # if this errors, try num_channels=2 (docs show both)
+    num_channel=2,
     chunk_size=3000,
     remove_unclear_example=True,
     online_transform=transforms.ToTensor(),
     label_transform=transforms.Compose([
-    transforms.Select(key="label"),  # <-- was "stage"
-    transforms.Lambda(lambda s: 0 if ("W" in s or s == "W") else 1)
-])
+        transforms.Select(key="label"),
+        transforms.Lambda(lambda s: 0 if ("W" in s or s == "W") else 1)
+    ])
 )
+print("Total samples:", len(dataset))
 
-loader = DataLoader(dataset, batch_size=64, shuffle=True)
+# ---------------------------
+# 3) Train / validation split
+# ---------------------------
+train_size = int(0.8 * len(dataset))
+val_size = len(dataset) - train_size
+train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
-# 2) Model: must match dataset sample shape (C, T) = (2, 3000)
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
+
+# ---------------------------
+# 4) Model
+# ---------------------------
 model = EEGNet(
     chunk_size=3000,
     num_electrodes=2,
@@ -34,25 +61,80 @@ model = EEGNet(
     F1=8,
     F2=16,
     D=2,
-    num_classes=2
-)
+    num_classes=6
+).to(device)
 
-x, y = next(iter(loader))   # x: [B, 2, 3000]
-print("x shape from loader:", x.shape)
-x = x.unsqueeze(1)                      # -> [64, 1, 2, 3000]
-print("x shape for EEGNet:", x.shape)
-logits = model(x)
-print("Input shape:", x.shape)
-print("Output shape:", logits.shape)
-'''
-class EEGDataset(Dataset):
-    def __init__(self, X, Y):
-        self.X = torch.tensor(X, dtype=torch.float32)
-        self.Y = torch.tensor(Y, dtype=torch.long).squeeze()
+# ---------------------------
+# 5) Loss / optimizer
+# ---------------------------
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
-    def __len__(self):
-        return len(self.X)
+# ---------------------------
+# 6) Evaluation function
+# ---------------------------
+def evaluate(model, loader, criterion, device):
+    model.eval()
+    total_loss = 0.0
+    correct = 0
+    total = 0
 
-    def __getitem__(self, idx):
-        return self.X[idx], self.Y[idx]
-    '''
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device).float()
+            y = y.to(device).long()
+
+            # EEGNet expects [B, 1, C, T]
+            x = x.unsqueeze(1)
+
+            logits = model(x)
+            loss = criterion(logits, y)
+
+            total_loss += loss.item() * x.size(0)
+            preds = torch.argmax(logits, dim=1)
+            correct += (preds == y).sum().item()
+            total += y.size(0)
+
+    avg_loss = total_loss / total
+    acc = correct / total
+    return avg_loss, acc
+
+# ---------------------------
+# 7) Training loop
+# ---------------------------
+num_epochs = 10
+
+for epoch in range(num_epochs):
+    model.train()
+    running_loss = 0.0
+    correct = 0
+    total = 0
+
+    for x, y in train_loader:
+        x = x.to(device).float()
+        y = y.to(device).long()
+
+        # reshape to [B, 1, C, T]
+        x = x.unsqueeze(1)
+
+        optimizer.zero_grad()
+        logits = model(x)
+        loss = criterion(logits, y)
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item() * x.size(0)
+        preds = torch.argmax(logits, dim=1)
+        correct += (preds == y).sum().item()
+        total += y.size(0)
+
+    train_loss = running_loss / total
+    train_acc = correct / total
+
+    val_loss, val_acc = evaluate(model, val_loader, criterion, device)
+
+    print(
+        f"Epoch [{epoch+1}/{num_epochs}] | "
+        f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
+        f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}"
+    )
