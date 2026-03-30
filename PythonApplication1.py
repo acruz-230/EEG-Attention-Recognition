@@ -1,9 +1,9 @@
+import h5py
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
-from torcheeg.datasets import SleepEDFxDataset
-from torcheeg import transforms
+from torch.utils.data import Dataset, DataLoader, random_split
 from torcheeg.models import EEGNet
 
 # ---------------------------
@@ -14,33 +14,55 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
 # ---------------------------
-# 2) Dataset
+# 2) Custom Dataset for MATLAB file
 # ---------------------------
+class MatSleepDataset(Dataset):
+    def __init__(self, mat_path):
+        self.mat_path = mat_path
 
-label_map = {
-    "W": 0,   # Wake
-    "1": 1,   # N1
-    "2": 2,   # N2
-    "3": 3,   # N3
-    "4": 4,   # N4
-    "R": 5    # REM
-}
-dataset = SleepEDFxDataset(
-    root_path="./sleep-edf-database-expanded-1.0.0",
-    version="cassette",
-    num_channel=2,
-    chunk_size=3000,
-    remove_unclear_example=True,
-    online_transform=transforms.ToTensor(),
-    label_transform=transforms.Compose([
-        transforms.Select(key="label"),
-        transforms.Lambda(lambda s: 0 if ("W" in s or s == "W") else 1)
-    ])
-)
-print("Total samples:", len(dataset))
+        with h5py.File(mat_path, "r") as f:
+            # X shape observed: (2650, 3000)
+            X = np.array(f["X"], dtype=np.float32)
+
+            # Ynum shape observed: (1, 2650)
+            y = np.array(f["Ynum"]).squeeze()
+
+            # Convert labels to integer class IDs
+            y = y.astype(np.int64)
+
+        # Sanity checks
+        if X.ndim != 2:
+            raise ValueError(f"Expected X to be 2D [epochs, samples], got shape {X.shape}")
+
+        if len(X) != len(y):
+            raise ValueError(f"Mismatch: X has {len(X)} epochs but y has {len(y)} labels")
+
+        self.X = X
+        self.y = y
+
+        print("Loaded X shape:", self.X.shape)
+        print("Loaded y shape:", self.y.shape)
+        print("Unique labels:", np.unique(self.y, return_counts=True))
+
+    def __len__(self):
+        return len(self.y)
+
+    def __getitem__(self, idx):
+        x = torch.tensor(self.X[idx], dtype=torch.float32)   # shape: [3000]
+        y = torch.tensor(self.y[idx], dtype=torch.long)
+
+        # Since this dataset appears to be single-channel, reshape to [C, T] = [1, 3000]
+        x = x.unsqueeze(0)
+
+        return x, y
 
 # ---------------------------
-# 3) Train / validation split
+# 3) Load dataset
+# ---------------------------
+dataset = MatSleepDataset("./sleep_epoch_dataset.mat")
+
+# ---------------------------
+# 4) Train / validation split
 # ---------------------------
 train_size = int(0.8 * len(dataset))
 val_size = len(dataset) - train_size
@@ -50,28 +72,31 @@ train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 
 # ---------------------------
-# 4) Model
+# 5) Model
 # ---------------------------
+# IMPORTANT:
+# Your MATLAB file appears to contain 1 channel per epoch, not 2.
+# So num_electrodes should be 1 here.
 model = EEGNet(
     chunk_size=3000,
-    num_electrodes=2,
+    num_electrodes=1,
     dropout=0.5,
     kernel_1=64,
     kernel_2=16,
     F1=8,
     F2=16,
     D=2,
-    num_classes=6
+    num_classes=5
 ).to(device)
 
 # ---------------------------
-# 5) Loss / optimizer
+# 6) Loss / optimizer
 # ---------------------------
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=1e-3)
 
 # ---------------------------
-# 6) Evaluation function
+# 7) Evaluation function
 # ---------------------------
 def evaluate(model, loader, criterion, device):
     model.eval()
@@ -81,11 +106,11 @@ def evaluate(model, loader, criterion, device):
 
     with torch.no_grad():
         for x, y in loader:
-            x = x.to(device).float()
+            x = x.to(device).float()   # x shape from loader: [B, 1, 3000]
             y = y.to(device).long()
 
             # EEGNet expects [B, 1, C, T]
-            x = x.unsqueeze(1)
+            x = x.unsqueeze(1)         # -> [B, 1, 1, 3000]
 
             logits = model(x)
             loss = criterion(logits, y)
@@ -100,9 +125,12 @@ def evaluate(model, loader, criterion, device):
     return avg_loss, acc
 
 # ---------------------------
-# 7) Training loop
+# 8) Training loop
 # ---------------------------
-num_epochs = 10
+num_epochs = 100
+best_val_loss = float('inf')
+patience = 2
+counter = 0
 
 for epoch in range(num_epochs):
     model.train()
@@ -111,11 +139,11 @@ for epoch in range(num_epochs):
     total = 0
 
     for x, y in train_loader:
-        x = x.to(device).float()
+        x = x.to(device).float()   # [B, 1, 3000]
         y = y.to(device).long()
 
         # reshape to [B, 1, C, T]
-        x = x.unsqueeze(1)
+        x = x.unsqueeze(1)         # [B, 1, 1, 3000]
 
         optimizer.zero_grad()
         logits = model(x)
@@ -138,3 +166,17 @@ for epoch in range(num_epochs):
         f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
         f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}"
     )
+
+    # Early stopping check must happen AFTER val_loss is computed
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        counter = 0
+
+        # Save best model
+        torch.save(model.state_dict(), "best_model.pth")
+    else:
+        counter += 1
+
+    if counter >= patience:
+        print("Early stopping triggered")
+        break
