@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, random_split
 from torcheeg.models import EEGNet
+import random
 
 # ---------------------------
 # 1) Reproducibility / device
@@ -92,8 +93,12 @@ model = EEGNet(
 # ---------------------------
 # 6) Loss / optimizer
 # ---------------------------
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=1e-3)
+class_counts = np.array([1997, 58, 250, 220, 125], dtype=np.float32)
+class_weights = class_counts.sum() / (len(class_counts) * class_counts)
+class_weights = torch.tensor(class_weights, dtype=torch.float32).to(device)
+
+criterion = nn.CrossEntropyLoss(weight=class_weights)
+optimizer = optim.Adam(model.parameters(), lr=5e-4)
 
 # ---------------------------
 # 7) Evaluation function
@@ -129,7 +134,7 @@ def evaluate(model, loader, criterion, device):
 # ---------------------------
 num_epochs = 100
 best_val_loss = float('inf')
-patience = 2
+patience = 10
 counter = 0
 
 for epoch in range(num_epochs):
@@ -180,3 +185,23 @@ for epoch in range(num_epochs):
     if counter >= patience:
         print("Early stopping triggered")
         break
+    model.eval()
+
+model.load_state_dict(torch.load("best_model.pth", map_location=device))
+model.eval()
+
+print("\n20 random predictions vs actual labels:\n")
+
+indices = random.sample(range(len(dataset)), 20)
+
+with torch.no_grad():
+    for idx in indices:
+        x, y = dataset[idx]
+        x = x.unsqueeze(0)
+        x = x.unsqueeze(1)
+        x = x.to(device).float()
+
+        logits = model(x)
+        pred = torch.argmax(logits, dim=1).item()
+
+        print(f"Sample {idx}: Predicted = {pred}, Actual = {y.item()}")
