@@ -1,87 +1,95 @@
-
 import os
-import glob
-import pandas as pd
+import random
 import numpy as np
+import scipy.io
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, random_split
 from torcheeg.models import EEGNet
-import random
 
 # ---------------------------
 # 1) Reproducibility / device
 # ---------------------------
 torch.manual_seed(42)
+np.random.seed(42)
+random.seed(42)
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
 # ---------------------------
-# 2) Custom Dataset (CSV epochs)
+# 2) Dataset for MATLAB file
 # ---------------------------
-class SingleNodeEEGDataset(Dataset):
-    def __init__(self, data_dir, node_name="AF3", label_map=None):
-        self.data_dir = data_dir
-        self.node_name = node_name
+class MatlabSingleNodeEEGDataset(Dataset):
+    def __init__(self, mat_path, x_key="X", y_key="Ynum"):
+        self.mat_path = mat_path
+        self.x_key = x_key
+        self.y_key = y_key
 
-        if label_map is None:
-            label_map = {
-                "NoMusic_Question": 0,
-                "Music_Question": 1
-            }
-        self.label_map = label_map
+        if not os.path.exists(mat_path):
+            raise FileNotFoundError(f"Could not find dataset file:\n{mat_path}")
 
-        # Load all CSV files
-        self.file_list = sorted(glob.glob(os.path.join(data_dir, "*.csv")))
+        data = scipy.io.loadmat(mat_path)
 
-        if len(self.file_list) == 0:
-            raise ValueError(f"No CSV files found in {data_dir}")
+        if x_key not in data:
+            raise KeyError(f"'{x_key}' not found in MATLAB file. Keys: {list(data.keys())}")
 
-        print(f"Found {len(self.file_list)} epoch files.")
+        if y_key not in data:
+            raise KeyError(f"'{y_key}' not found in MATLAB file. Keys: {list(data.keys())}")
 
-        # Inspect first file
-        df = pd.read_csv(self.file_list[0])
+        X = data[x_key]
+        Y = data[y_key]
 
-        if self.node_name not in df.columns:
-            raise ValueError(f"Column '{self.node_name}' not found.")
+        print("Raw X shape from .mat:", X.shape)
+        print("Raw Y shape from .mat:", Y.shape)
 
-        if "label" not in df.columns:
-            raise ValueError("Column 'label' not found.")
+        # Expecting X = [epochs, time] = [293, 640]
+        if X.ndim != 2:
+            raise ValueError(
+                f"Expected X to be 2D [epochs, time], but got shape {X.shape}"
+            )
 
-        self.samples_per_epoch = len(df)
+        # Flatten labels from [293,1] -> [293]
+        Y = np.squeeze(Y)
 
-        print("Loaded X shape:", (len(self.file_list), self.samples_per_epoch))
-        print("Loaded y shape:", (len(self.file_list),))
+        if Y.ndim != 1:
+            raise ValueError(
+                f"Expected Ynum to become 1D after squeeze, but got shape {Y.shape}"
+            )
 
-        # Collect labels
-        labels = []
-        for f in self.file_list:
-            d = pd.read_csv(f)
-            raw_label = d["label"].iloc[0]
+        if X.shape[0] != len(Y):
+            raise ValueError(
+                f"Mismatch: X has {X.shape[0]} epochs but Y has {len(Y)} labels"
+            )
 
-            if raw_label not in self.label_map:
-                raise ValueError(f"Unknown label '{raw_label}' in {f}")
+        # Convert to correct types
+        self.X = X.astype(np.float32)
+        self.Y = Y.astype(np.int64)
 
-            labels.append(self.label_map[raw_label])
+        # Optional: if MATLAB labels start at 1 instead of 0, shift them down
+        unique_labels = np.unique(self.Y)
+        if np.min(unique_labels) == 1:
+            print("Detected labels starting at 1. Converting to 0-based labels.")
+            self.Y = self.Y - 1
+            unique_labels = np.unique(self.Y)
 
-        labels = np.array(labels)
+        print("Loaded X shape:", self.X.shape)
+        print("Loaded y shape:", self.Y.shape)
+        print("Unique labels:", np.unique(self.Y, return_counts=True))
 
-        print("Unique labels:", np.unique(labels, return_counts=True))
-
-        self.labels = labels
+        self.num_epochs = self.X.shape[0]
+        self.samples_per_epoch = self.X.shape[1]
 
     def __len__(self):
-        return len(self.file_list)
+        return self.num_epochs
 
     def __getitem__(self, idx):
-        df = pd.read_csv(self.file_list[idx])
+        # x shape: [640]
+        x = self.X[idx]
 
-        # Signal: [640]
-        x = df[self.node_name].to_numpy(dtype=np.float32)
-
-        # Label
-        y = self.labels[idx]
+        # y shape: scalar
+        y = self.Y[idx]
 
         # Convert to tensors
         x = torch.tensor(x, dtype=torch.float32).unsqueeze(0)  # [1, 640]
@@ -92,7 +100,13 @@ class SingleNodeEEGDataset(Dataset):
 # ---------------------------
 # 3) Load dataset
 # ---------------------------
-dataset = SingleNodeEEGDataset("./AF3", node_name="AF3")
+mat_file = r"./AF3/p1_04_02_26_EPOCX_108311_2026.04.02T17.21.43.04.00_AF3_dataset.mat"
+
+dataset = MatlabSingleNodeEEGDataset(
+    mat_path=mat_file,
+    x_key="X",
+    y_key="Ynum"
+)
 
 # ---------------------------
 # 4) Train / validation split
@@ -100,14 +114,24 @@ dataset = SingleNodeEEGDataset("./AF3", node_name="AF3")
 train_size = int(0.8 * len(dataset))
 val_size = len(dataset) - train_size
 
-train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+train_dataset, val_dataset = random_split(
+    dataset,
+    [train_size, val_size],
+    generator=torch.Generator().manual_seed(42)
+)
 
 train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
 
+print(f"Train samples: {len(train_dataset)}")
+print(f"Val samples:   {len(val_dataset)}")
+
 # ---------------------------
 # 5) Model
 # ---------------------------
+num_classes = 4
+
+
 model = EEGNet(
     chunk_size=640,
     num_electrodes=1,
@@ -117,8 +141,11 @@ model = EEGNet(
     F1=8,
     F2=16,
     D=2,
-    num_classes=2
+    num_classes=4
 ).to(device)
+
+print("\nModel created:")
+print(model)
 
 # ---------------------------
 # 6) Loss / optimizer
@@ -134,12 +161,18 @@ def evaluate(model, loader, criterion, device):
     total_loss = 0.0
     correct = 0
     total = 0
+    best_val_loss = float("inf")
+    best_epoch = -1
+    best_train_loss = None
+    best_train_acc = None
+    best_val_acc = None
 
     with torch.no_grad():
         for x, y in loader:
             x = x.to(device).float()   # [B, 1, 640]
             y = y.to(device).long()
 
+            # EEGNet expects [B, 1, C, T]
             x = x.unsqueeze(1)         # [B, 1, 1, 640]
 
             logits = model(x)
@@ -155,9 +188,9 @@ def evaluate(model, loader, criterion, device):
 # ---------------------------
 # 8) Training loop
 # ---------------------------
-num_epochs = 50
-best_val_loss = float('inf')
-patience = 10
+num_epochs = 100
+best_val_loss = float("inf")
+patience = 15
 counter = 0
 
 for epoch in range(num_epochs):
@@ -170,6 +203,7 @@ for epoch in range(num_epochs):
         x = x.to(device).float()   # [B, 1, 640]
         y = y.to(device).long()
 
+        # EEGNet expects [B, 1, C, T]
         x = x.unsqueeze(1)         # [B, 1, 1, 640]
 
         optimizer.zero_grad()
@@ -197,7 +231,14 @@ for epoch in range(num_epochs):
     # Early stopping
     if val_loss < best_val_loss:
         best_val_loss = val_loss
+        best_epoch = epoch + 1
+
+        best_train_loss = train_loss
+        best_train_acc = train_acc
+        best_val_acc = val_acc
+
         counter = 0
+
         torch.save(model.state_dict(), "best_model.pth")
     else:
         counter += 1
@@ -215,9 +256,17 @@ model.eval()
 # ---------------------------
 # 10) Print predictions
 # ---------------------------
+print("\n===== BEST EPOCH RESULTS =====")
+print(f"Best Epoch: {best_epoch}")
+print(f"Train Loss: {best_train_loss:.4f}")
+print(f"Train Acc : {best_train_acc:.4f}")
+print(f"Val Loss  : {best_val_loss:.4f}")
+print(f"Val Acc   : {best_val_acc:.4f}")
+print("================================\n")
 print("\n20 random predictions vs actual labels:\n")
 
-indices = random.sample(range(len(dataset)), 20)
+num_to_show = min(20, len(dataset))
+indices = random.sample(range(len(dataset)), num_to_show)
 
 with torch.no_grad():
     for idx in indices:
