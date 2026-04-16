@@ -8,49 +8,48 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, random_split
 from torcheeg.models import EEGNet
 
-# ---------------------------
-# 1) Reproducibility / device
-# ---------------------------
+
+# Reproducibility
 torch.manual_seed(42)
 np.random.seed(42)
 random.seed(42)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
 print("Using device:", device)
 
-# ---------------------------
-# 2) Dataset for MATLAB file
-# ---------------------------
-class MatlabSingleNodeEEGDataset(Dataset):
-    def __init__(self, mat_path, x_key="X", y_key="Ynum"):
-        self.mat_path = mat_path
-        self.x_key = x_key
-        self.y_key = y_key
 
-        if not os.path.exists(mat_path):
-            raise FileNotFoundError(f"Could not find dataset file:\n{mat_path}")
+# Dataset
+class EEGDataset(Dataset):
+    def __init__(self, data_path, Eeg_epochs="X", Epoch_labels="Ynum"):
+        self.file_path = data_path
+        self.x_data = Eeg_epochs
+        self.y_labels = Epoch_labels
 
-        data = scipy.io.loadmat(mat_path)
+        #Error Checking/ File Sanity Checks
+        if not os.path.exists(data_path):
+            raise FileNotFoundError(f"Could not find dataset file:\n{data_path}")
 
-        if x_key not in data:
-            raise KeyError(f"'{x_key}' not found in MATLAB file. Keys: {list(data.keys())}")
+        data = scipy.io.loadmat(data_path)
 
-        if y_key not in data:
-            raise KeyError(f"'{y_key}' not found in MATLAB file. Keys: {list(data.keys())}")
+        if Eeg_epochs not in data:
+            raise KeyError(f"'{Eeg_epochs}' not found in MATLAB file. Keys: {list(data.keys())}")
 
-        X = data[x_key]
-        Y = data[y_key]
+        if Epoch_labels not in data:
+            raise KeyError(f"'{Epoch_labels}' not found in MATLAB file. Keys: {list(data.keys())}")
+
+        X = data[Eeg_epochs]
+        Y = data[Epoch_labels]
 
         print("Raw X shape from .mat:", X.shape)
         print("Raw Y shape from .mat:", Y.shape)
 
-        # Expecting X = [epochs, time] = [293, 640]
+        # [epochs, time] = [293, 640]
         if X.ndim != 2:
             raise ValueError(
                 f"Expected X to be 2D [epochs, time], but got shape {X.shape}"
             )
 
-        # Flatten labels from [293,1] -> [293]
+        # [293]
         Y = np.squeeze(Y)
 
         if Y.ndim != 1:
@@ -63,11 +62,9 @@ class MatlabSingleNodeEEGDataset(Dataset):
                 f"Mismatch: X has {X.shape[0]} epochs but Y has {len(Y)} labels"
             )
 
-        # Convert to correct types
         self.X = X.astype(np.float32)
         self.Y = Y.astype(np.int64)
 
-        # Optional: if MATLAB labels start at 1 instead of 0, shift them down
         unique_labels = np.unique(self.Y)
         if np.min(unique_labels) == 1:
             print("Detected labels starting at 1. Converting to 0-based labels.")
@@ -85,32 +82,28 @@ class MatlabSingleNodeEEGDataset(Dataset):
         return self.num_epochs
 
     def __getitem__(self, idx):
-        # x shape: [640]
         x = self.X[idx]
 
-        # y shape: scalar
         y = self.Y[idx]
 
-        # Convert to tensors
-        x = torch.tensor(x, dtype=torch.float32).unsqueeze(0)  # [1, 640]
+        # [1, 640]
+        x = torch.tensor(x, dtype=torch.float32).unsqueeze(0)   
         y = torch.tensor(y, dtype=torch.long)
 
         return x, y
 
-# ---------------------------
-# 3) Load dataset
-# ---------------------------
-mat_file = r"./AF3/p1_04_02_26_EPOCX_108311_2026.04.02T17.21.43.04.00_AF3_dataset.mat"
 
-dataset = MatlabSingleNodeEEGDataset(
-    mat_path=mat_file,
-    x_key="X",
-    y_key="Ynum"
+mat_file = r"./AF3/AF3_combined.mat"
+
+dataset = EEGDataset(
+    data_path=mat_file,
+    Eeg_epochs="X",
+    Epoch_labels="Ynum"
 )
 
-# ---------------------------
-# 4) Train / validation split
-# ---------------------------
+
+# Training loop definition
+# 80% to train rest to validate
 train_size = int(0.8 * len(dataset))
 val_size = len(dataset) - train_size
 
@@ -126,9 +119,7 @@ val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
 print(f"Train samples: {len(train_dataset)}")
 print(f"Val samples:   {len(val_dataset)}")
 
-# ---------------------------
-# 5) Model
-# ---------------------------
+# EEGNet model definition
 num_classes = 4
 
 
@@ -147,15 +138,12 @@ model = EEGNet(
 print("\nModel created:")
 print(model)
 
-# ---------------------------
-# 6) Loss / optimizer
-# ---------------------------
+# Loss / optimizer definition
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=1e-3)
+optimizer = optim.Adam(model.parameters(), lr=5e-4)
 
-# ---------------------------
-# 7) Evaluation function
-# ---------------------------
+
+#Testing Definition
 def evaluate(model, loader, criterion, device):
     model.eval()
     total_loss = 0.0
@@ -169,11 +157,10 @@ def evaluate(model, loader, criterion, device):
 
     with torch.no_grad():
         for x, y in loader:
-            x = x.to(device).float()   # [B, 1, 640]
+            x = x.to(device).float()  
             y = y.to(device).long()
 
-            # EEGNet expects [B, 1, C, T]
-            x = x.unsqueeze(1)         # [B, 1, 1, 640]
+            x = x.unsqueeze(1)         
 
             logits = model(x)
             loss = criterion(logits, y)
@@ -185,37 +172,34 @@ def evaluate(model, loader, criterion, device):
 
     return total_loss / total, correct / total
 
-# ---------------------------
-# 8) Training loop
-# ---------------------------
-num_epochs = 100
+# Training loop
+loops = 100
 best_val_loss = float("inf")
-patience = 15
+patience = 20
 counter = 0
 
-for epoch in range(num_epochs):
+for epoch in range(loops):
     model.train()
     running_loss = 0.0
     correct = 0
     total = 0
 
-    for x, y in train_loader:
-        x = x.to(device).float()   # [B, 1, 640]
-        y = y.to(device).long()
+    for x_eeg, y_labels in train_loader:
+        x_eeg = x_eeg.to(device).float()  
+        y_labels = y_labels.to(device).long()
 
-        # EEGNet expects [B, 1, C, T]
-        x = x.unsqueeze(1)         # [B, 1, 1, 640]
+        x_eeg = x_eeg.unsqueeze(1)      
 
         optimizer.zero_grad()
-        logits = model(x)
-        loss = criterion(logits, y)
+        scores = model(x_eeg)
+        loss = criterion(scores, y_labels)
         loss.backward()
         optimizer.step()
 
-        running_loss += loss.item() * x.size(0)
-        preds = torch.argmax(logits, dim=1)
-        correct += (preds == y).sum().item()
-        total += y.size(0)
+        running_loss += loss.item() * x_eeg.size(0)
+        preds = torch.argmax(scores, dim=1)
+        correct += (preds == y_labels).sum().item()
+        total += y_labels.size(0)
 
     train_loss = running_loss / total
     train_acc = correct / total
@@ -223,7 +207,7 @@ for epoch in range(num_epochs):
     val_loss, val_acc = evaluate(model, val_loader, criterion, device)
 
     print(
-        f"Epoch [{epoch+1}/{num_epochs}] | "
+        f"Epoch [{epoch+1}/{loops}] | "
         f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
         f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}"
     )
@@ -247,36 +231,38 @@ for epoch in range(num_epochs):
         print("Early stopping triggered")
         break
 
-# ---------------------------
-# 9) Load best model
-# ---------------------------
+#Load best model
 model.load_state_dict(torch.load("best_model.pth", map_location=device))
 model.eval()
 
-# ---------------------------
-# 10) Print predictions
-# ---------------------------
-print("\n===== BEST EPOCH RESULTS =====")
+
+# RESULTS
+print("\n__RESULTS__")
 print(f"Best Epoch: {best_epoch}")
 print(f"Train Loss: {best_train_loss:.4f}")
 print(f"Train Acc : {best_train_acc:.4f}")
-print(f"Val Loss  : {best_val_loss:.4f}")
-print(f"Val Acc   : {best_val_acc:.4f}")
-print("================================\n")
+print(f"Val Loss  : {best_val_loss:.2f}")
+print(f"Val Acc   : {best_val_acc:.2f}")
 print("\n20 random predictions vs actual labels:\n")
 
-num_to_show = min(20, len(dataset))
-indices = random.sample(range(len(dataset)), num_to_show)
+
+#Print random samples with guess and results from trained model
+rand_samp = 20
+indices = random.sample(range(len(dataset)), rand_samp)
 
 with torch.no_grad():
-    for idx in indices:
-        x, y = dataset[idx]
+    for i in indices:
+        x_eeg, y_labels = dataset[i]
 
-        x = x.unsqueeze(0)   # [1, 1, 640]
-        x = x.unsqueeze(1)   # [1, 1, 1, 640]
-        x = x.to(device).float()
+        #conform to [B, 1, C, T]
+        x_eeg = x_eeg.unsqueeze(0)   
+        x_eeg = x_eeg.unsqueeze(1) 
+        x_eeg = x_eeg.to(device).float()
 
-        logits = model(x)
-        pred = torch.argmax(logits, dim=1).item()
+        scores = model(x_eeg)
+        score_prob = torch.softmax(scores, dim=1)   
+        guess = torch.argmax(score_prob, dim=1).item()
+        guess_prob = score_prob[0, guess].item()     
 
-        print(f"Sample {idx}: Predicted = {pred}, Actual = {y.item()}")
+
+        print(f"Sample {i}: Predicted = {guess},{guess_prob:.2f}, Actual = {y_labels.item()}")
